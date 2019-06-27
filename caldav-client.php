@@ -19,8 +19,9 @@
 * 2019-06-19 add function DoCalendarRequest
 
 */
-
-
+require_once 'Hydrogen/libDebug.php';
+//set this to true to send debug output from this PHP file to the debugger above
+$debug[__FILE__]=true;
 /**
 * A class for accessing DAViCal via CalDAV, as a client
 */
@@ -176,6 +177,7 @@ class CalDAVClient {
   * @return string The content of the response from the server
   */
   function DoRequest( $relative_url = "" ) {
+	debug(__FILE__ . " DoRequest " . $this->requestMethod . " URL=" . $this->base_url . $relative_url,__FILE__);
     if(!defined("_FSOCK_TIMEOUT")){ define("_FSOCK_TIMEOUT", 10); }
     $headers = array();
 
@@ -190,6 +192,8 @@ class CalDAVClient {
     $headers[] = "User-Agent: " . $this->user_agent;
     $headers[] = 'Connection: close';
     $this->httpRequest = join("\r\n",$headers);
+	debug(__FILE__ . " DoRequest HEADERS=" . $this->httpRequest,__FILE__);
+	debug(__FILE__ . " DoRequest BODY=" . $this->body,__FILE__);
     $this->xmlRequest = $this->body;
 
     $fip = fsockopen( $this->protocol . '://' . $this->server, $this->port, $errno, $errstr, _FSOCK_TIMEOUT); //error handling?
@@ -201,6 +205,7 @@ class CalDAVClient {
 
     $this->headers = array();  // reset the headers array for our next request
     $this->ParseResponse($rsp);
+	//debug(__FILE__ . " DoRequest response=" . $rsp,__FILE__);
     return $rsp;
   }
 
@@ -271,18 +276,25 @@ PROPP;
 			$folder_xml = $this->DoXMLRequest("PROPFIND", $xmlC);
 			$actual_xml = substr($folder_xml,strpos($folder_xml,"<multistatus"));
 			$simpler_xml = str_replace("C:calendar","Ccalendar",str_replace("CS:getctag","CSgetctag",$actual_xml));
+			//debug("SIMPLIFIED XML: \n $simpler_xml \n",__FILE__);
 			$xMultiStatus = new SimpleXMLElement($simpler_xml);
 			$calendar_count=0;
-			foreach ($xMultiStatus  as $xURL) {
-				$child_url="";
-				$ctag="";
-				$dispname="";
-				foreach ($xURL as $xChild) {
+			foreach ($xMultiStatus  as $xResponse) {
+				//debug("XML MULTIRESPONSE",__FILE__);
+				$xchild_url="";
+				foreach ($xResponse as $xChild) {
+					
+					$ctag="";
+					$dispname="";
+					debug("---XML RESPONSE:: NAME:" . $xChild->getName() . " VALUE:" . $xChild->__toString() ,__FILE__);
 					if ($xChild->getName()=="href") {
-						$child_url= $xChild->__toString(); 
+						$xchild_url= $xChild->__toString(); 
+						debug("href set to $xchild_url",__FILE__);
 					}
 					foreach ($xChild as $xProps){
+						//debug("--- ---XML PROPSTAT",__FILE__ );
 						foreach ($xProps->children() as $xProp)	{
+							//debug("--- --- --- XML PROPERTY:: NAME:" . $xProp->getName() . " VALUE:" . $xProp->__toString(),__FILE__ );
 							if ($xProp->getName()=="displayname") {
 								$dispname = $xProp->__toString(); 
 							}
@@ -293,16 +305,18 @@ PROPP;
 						}
 					}
 
+					//now we check each child URL to see if it has a ctag (and display name)
+					//		if it does, its info is added to the return array
+					debug ("caldav-client: Checking ctag at href $xchild_url ",__FILE__);
+					if (strlen($ctag)>0) {
+						debug ("caldav-client: Adding calendar $calendar_count ($dispname) with ctag $ctag at href $xchild_url",__FILE__);
+						$calendars[$calendar_count]['url']=$xchild_url;
+						$calendars[$calendar_count]['ctag']=$ctag;
+						$calendars[$calendar_count]['display-name']=$dispname;
+						$calendar_count = $calendar_count +1;
+					}
+				}
 
-				}
-				//now we check each child URL to see if it has a ctag (and display name)
-				//		if it does, its info is added to the return array
-				if (strlen($ctag)>0) {
-					$calendars[$calendar_count]['url']=$child_url;
-					$calendars[$calendar_count]['ctag']=$ctag;
-					$calendars[$calendar_count]['display-name']=$dispname;
-					$calendar_count += $calendar_count;
-				}
 
 			}
 		
@@ -398,7 +412,7 @@ PROPP;
 </C:calendar-query>
 EOXML;
 
-	if($etags_only) $xml=str_replace("<C:calendar-data/>","",$xml);
+	if($etags_only) $xml=str_replace('    <C:calendar-data/>' . "\n",'',$xml);
 
     $this->DoXMLRequest( 'REPORT', $xml, $relative_url );
     $xml_parser = xml_parser_create_ns('UTF-8');
@@ -466,6 +480,31 @@ EOFILTER;
     return $this->DoCalendarQuery($filter, $relative_url, $etags_only);
   }
 
+  /**
+  * Get the todos The events are returned as an
+  * array of event arrays.  Each event array will have a 'href', 'etag' and 'event'
+  * part, where the 'href' is relative to the calendar and the event contains the
+  * definition of the event in iCalendar format.
+  *
+  * @param string    $relative_url The URL relative to the base_url specified when the calendar was opened.  Default ''.
+  *
+  * @return array An array of the relative URLs, etags, and events, returned from DoCalendarQuery() @see DoCalendarQuery()
+  */
+  function GetAllTodos($relative_url = "", $etags_only=false  ) {
+
+    $filter = <<<EOFILTER
+  <C:filter>
+    <C:comp-filter name="VCALENDAR">
+          <C:comp-filter name="VTODO">
+          </C:comp-filter>
+    </C:comp-filter>
+  </C:filter>
+EOFILTER;
+
+    return $this->DoCalendarQuery($filter, $relative_url, $etags_only);
+  }
+
+
 
   /**
   * Get the todo's in a range from $start to $finish.  The dates should be in the
@@ -488,7 +527,7 @@ EOFILTER;
 $time_range = <<<EOTIME
                 <C:time-range start="$start" end="$finish"/>
 EOTIME;
-    } //else $time_range = "";
+    } else $time_range = "";
 
     // Warning!  May contain traces of double negatives...
     $neg_cancelled = ( $cancelled === true ? "no" : "yes" );
@@ -551,6 +590,7 @@ EOFILTER;
   */
   function GetEntryByHref( $href, $relative_url = '' ) {
     return $this->DoGETRequest( $relative_url . $href );
+	//debug("GetEntryByHref: submitting GET: " . $relative_url . $href,__FILE__);
   }
 
 }
